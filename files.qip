@@ -1,0 +1,26 @@
+# ===== Tempest on the Star Wars chassis =====
+# Proven SW DDR renderer + shared dpram (chassis):
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/vector_fb_ddram.sv
+set_global_assignment -name VHDL_FILE rtl/dpram.vhd
+
+# Tempest game module + dependencies:
+set_global_assignment -name VHDL_FILE rtl/pkg_bwidow.vhd
+set_global_assignment -name VHDL_FILE rtl/dpram2k.vhd
+set_global_assignment -name VHDL_FILE rtl/pokey.vhd
+set_global_assignment -name VHDL_FILE rtl/earom.vhd
+set_global_assignment -name VHDL_FILE rtl/avg/vector_drawer.vhd
+set_global_assignment -name VHDL_FILE rtl/avg/avg_tempest.vhd
+set_global_assignment -name VHDL_FILE rtl/t65/T65_Pack.vhd
+set_global_assignment -name VHDL_FILE rtl/t65/T65_MCode.vhd
+set_global_assignment -name VHDL_FILE rtl/t65/T65_ALU.vhd
+set_global_assignment -name VHDL_FILE rtl/t65/T65.vhd
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mathbox.sv
+set_global_assignment -name VHDL_FILE rtl/tempest.vhd
+
+# Tempest graft wrapper (tempest.vhd + coord-scale + vector_fb_ddram + 980x700 sync):
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tempest_sw.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/present_gate.sv
+
+# Top + constraints:
+set_global_assignment -name SYSTEMVERILOG_FILE "Arcade-StarWars.sv"
+set_global_assignment -name SDC_FILE "Arcade-StarWars.sdc"
