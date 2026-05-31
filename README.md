@@ -6,10 +6,9 @@ game module onto the proven **Star Wars** color-vector chassis
 ([Videodr0me/Arcade-StarWars_MiSTer](https://github.com/Videodr0me/Arcade-StarWars_MiSTer)),
 reusing its DDR3 vector framebuffer, display path, audio chain, and OSD.
 
-> **Status:** boots, renders the attract, and is playable on real DE10-Nano
-> hardware — spinner, fire, superzapper, coins, and audio all confirmed. The one
-> open item has been display **flicker**; see [Vector presentation](#vector-presentation--the-flicker-fix)
-> for the current state of the fix.
+> **Status:** boots and is playable on real DE10-Nano hardware — spinner, fire,
+> superzapper, coins, and audio all confirmed, and the display is stable (see
+> [Vector presentation](#vector-presentation--the-flicker-fix)).
 
 ---
 
@@ -39,9 +38,8 @@ are still named `Arcade-StarWars` internally. What you flash is renamed to
 - **2× POKEY** audio, the **spinner** (read through POKEY 1's pot lines), the Atari
   **math box** (shared Battlezone/Red Baron/Tempest behavioral model), and the
   EAROM stub.
-- A **coordinate map** (Tempest tube → the 980×700 framebuffer) with OSD-tunable
-  orientation/scale, and a **list-aligned vector present-gate** (`rtl/present_gate.sv`)
-  — see below.
+- A **coordinate map** (Tempest tube → the 980×700 framebuffer) and a
+  **phosphor-persistence vector present-gate** (`rtl/present_gate.sv`) — see below.
 
 **Reused, unchanged — Videodr0me's Star Wars chassis:** `vector_fb_ddram.sv` (the
 DDR3 triple-buffer vector framebuffer), the MISTER_FB display path, the `sys/`
@@ -49,22 +47,23 @@ MiSTer framework, clock/CDC plumbing, and the OSD/DIP infrastructure.
 
 ## Vector presentation — the flicker fix
 
-The chassis renders one *raster* frame at a time, but the Tempest AVG redraws its
-*vector* display list continuously at ~245 Hz (the CPU kicks `vggo`/`$4800` once per
-~250 Hz IRQ — one complete list every ~4 ms). The job of the present-gate is to hand
-the framebuffer **exactly one complete list per displayed frame** — without cutting a
-list mid-draw (which shows up as flicker) and without overrunning the DDR buffer-clear.
+A real Tempest redraws its whole vector display list ~200–250 times a second, and
+the CRT phosphor *integrates* those redraws: any beam a single redraw happens to
+miss is refilled by the next, and fast objects leave a soft trail. That integration
+is what makes a real tube look rock-steady.
 
-`rtl/present_gate.sv` does this by **list-aligned capture**: paced to a fixed rate
-locked to the HDMI vblank (no beat against scan-out), it opens the beam on one `vggo`
-and closes + swaps on the **next** `vggo`, so each displayed buffer holds one whole
-list — no dropped tail (important when firing grows the list with projectiles) and no
-smear. If `vggo` is ever unavailable it safely degrades to a plain time-window gate.
+A DDR framebuffer has no phosphor, so presenting one redraw per displayed frame
+exposes every beam the shared-DDR bus drops (intermittent dropped beams when idle)
+and any list cut mid-draw drops its tail (flashing projectiles when firing).
 
-This replaced an earlier vblank time-window gate that cut the list at a drifting phase
-and starved the buffer-clear, which flickered continuously. The list-aligned gate is
-verified in simulation (ModelSim, `sim/fb/tb_gate2.sv`); the AVG cadence it relies on
-is confirmed by a GHDL probe of the real ROMs.
+`rtl/present_gate.sv` emulates the phosphor: it accumulates **N complete AVG lists**
+(each bounded by the CPU's once-per-list `vggo`/`$4800` strobe) into one draw buffer
+with no clear between them — a union of N redraws. Dropped beams get refilled across
+redraws (no idle flicker), and because every accumulated list is *complete*, the
+projectile tail is never cut (no firing flash). The framebuffer keeps swapping on
+its own scan-out vblank, so the per-frame clear window is never visible. **N is a
+live OSD knob** ("Persistence") so you can dial the amount of ghosting on hardware.
+The fix is verified in simulation (`sim/fb/tb_gate2.sv`).
 
 ## Install
 
@@ -87,19 +86,22 @@ Launch the MRA from the MiSTer arcade menu.
 | **Start 1P / 2P** | Start |
 | **Coin** | Insert coin |
 
-The MRA maps these to a standard pad as well (Fire / Superzapper / Start / Coin);
-a real spinner gives the intended control.
+The MRA also maps these to a standard pad (Fire / Superzapper / Start / Coin); a
+real spinner gives the intended control.
 
 ## OSD options
 
-Beyond the standard MiSTer video/scaler options, this core exposes hardware
-bring-up knobs for the vector presentation:
+Beyond the standard MiSTer video/scaler options, this core exposes:
 
-- **Frame Gate (bypass)** — bypasses the present-gate for native AVG pass-through
-  (diagnostic; normal play leaves the gate on).
+- **Aspect ratio** — *Optimized* (auto integer scale to your output) or
+  *Pixel Perfect* (1:1).
 - **Rotate / Flip** — orientation relative to the built-in baseline, for portrait
   cabinet monitors.
-- **Vector Scale** — image scale within the framebuffer.
+- **Frame Gate** — *On* (normal) presents via the persistence gate; *Off* is a
+  native AVG pass-through diagnostic.
+- **Persistence** — how many complete vector redraws are accumulated per displayed
+  frame (3 default / 4 / 6 / 2). Higher = more phosphor-like ghosting/trails and
+  more resistance to dropped beams; lower = crisper but flickerier.
 
 ## Known limitations
 
@@ -117,8 +119,9 @@ quartus_sh --flow compile Arcade-StarWars
 # -> output_files/Arcade-StarWars.rbf  ->  rename to Arcade-Tempest_<date>.rbf
 ```
 
-Simulation lives in `sim/` (ModelSim ASE present-gate/framebuffer tests) and the
-GHDL boot/cadence testbench. See the in-tree handoff notes for the sim recipes.
+Simulation lives in `sim/` (ModelSim ASE present-gate / framebuffer tests) and the
+GHDL boot/cadence testbench. See `HANDOFF-tempest-sw-resume.md` for the sim recipes
+and design history.
 
 ## Credits & license
 
