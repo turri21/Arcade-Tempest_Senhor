@@ -9,9 +9,9 @@ reusing its DDR3 vector framebuffer, display path, audio chain, and OSD.
 > **Status:** boots and is playable on real DE10-Nano hardware — fire,
 > superzapper, coins, audio, and a stable flicker-free display all confirmed, and
 > the picture fills the screen with clean integer scaling up to 4K (see
-> [Vector presentation](#vector-presentation--the-flicker-fix)). Rotation via the
-> analog stick is confirmed; a physical USB **spinner is implemented but untested**
-> (the developer doesn't own one) — see [Controls](#controls).
+> [Vector presentation](#vector-presentation--the-flicker-fix)). Rotation is
+> confirmed on hardware via both the analog stick and a **USB mouse / spinner**
+> (velocity-sensitive, with an OSD direction toggle) — see [Controls](#controls).
 
 > ⚠️ **ROMs required — not included.** This core does nothing without the Tempest
 > romset. You must supply **`tempest.zip`** (MAME `tempest`) in your MiSTer's
@@ -94,19 +94,22 @@ hardware). This core feeds that knob from any of three sources, in priority orde
 | Input | Action |
 |---|---|
 | **Spinner / paddle** (USB) | Rotate around the tube — the authentic control |
+| **USB mouse** (move L / R) | Rotate (same path as a spinner; velocity-sensitive) |
 | **Left analog stick** | Rotate (rate-proportional: full throw = fast, feather = fine) |
 | **D-pad ← / →** | Rotate (fixed rate) |
-| **Fire** | Fire |
-| **Superzapper** | Superzapper (screen-clear, limited) |
+| **Fire** / mouse left btn | Fire |
+| **Superzapper** / mouse right btn | Superzapper (screen-clear, limited) |
 | **Start 1P / 2P** | Start |
 | **Coin** | Insert coin |
 
-> **Note on the spinner:** real USB-spinner support is implemented to match MAME's
-> Tempest knob model, but the developer does **not** own a physical spinner, so it
-> has only been verified via the analog-stick path (which drives the same internal
-> knob counter). If you have a spinner/paddle, please try it and
-> [report back](https://github.com/derpyder/Arcade-Tempest_MiSTer/issues) —
-> especially direction and sensitivity, which are one-line tweaks if they feel off.
+> **Spinner / mouse:** rotation is **velocity-sensitive** — small movements nudge
+> the tube one notch at a time, faster movements spin proportionally faster, all
+> kept within the game's 4-bit knob decode so the direction is always correct at any
+> speed. The path is confirmed on hardware with a **USB mouse** (which is how most
+> USB spinners enumerate). If your spinner turns the wrong way, flip **Spinner
+> Reverse** in the OSD. Dedicated spinner devices feed the same internal stepper; if
+> yours needs a tweak, please
+> [report back](https://github.com/derpyder/Arcade-Tempest_MiSTer/issues).
 
 ## OSD options
 
@@ -122,6 +125,8 @@ Beyond the standard MiSTer video/scaler options, this core exposes:
 - **Persistence** — how many complete vector redraws are accumulated per displayed
   frame (3 default / 4 / 6 / 2). Higher = more phosphor-like ghosting/trails and
   more resistance to dropped beams; lower = crisper but flickerier.
+- **Spinner Reverse** — flip the spinner/mouse rotation direction (Off / On), so a
+  clockwise turn of your device matches clockwise on the tube.
 
 ## Known limitations
 

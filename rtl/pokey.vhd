@@ -315,13 +315,20 @@ begin
     end if;
   end process;
 
+  -- POT read -- DIGITAL/BIMODAL model matching MAME's Tempest hookup.
+  -- The original RC-count model here (`-- POT ANALOGUE IN UNTESTED !!`) never reached 228:
+  -- it latched pot_cnt only while pin_reg(i)='0', and pot_fin/timing left every pot stuck at 0
+  -- (proven in sim/fb/tb_pokeypot.vhd: all pots read 0 regardless of PIN -> the spinner was a
+  -- constant value -> the claw spun one way forever).  Tempest reads each pot as ONE knob bit
+  -- via input_port_1_bit_r: `return (in1 & (1<<i)) ? 0 : 228;`  i.e. PIN[i]='1' -> 0, '0' -> 228.
+  -- Model that directly (per-bit, no RC scan).  Pots are control-only here; audio path untouched,
+  -- and games that don't use pots (BW/Gravitar/MH) drive PIN with fixed levels -> unaffected.
   p_pot_val : process
   begin
     wait until rising_edge(CLK);
     for i in 0 to 7 loop
-      if (pot_fin = '0') and (pin_reg(i) = '0') then
-        -- continue latching counter value until input reaches ViH threshold
-        pot_val(i) <= pot_cnt;
+      if (pin_reg(i) = '1') then pot_val(i) <= x"00";        -- bit set   -> 0
+      else                       pot_val(i) <= x"E4";        -- bit clear -> 228
       end if;
     end loop;
   end process;

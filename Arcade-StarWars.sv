@@ -306,13 +306,14 @@ localparam CONF_STR = {
 	"O7,Mirror,Off,On;",
 	"OA,Frame Gate,On,Off;",
 	"OST,Persistence,3 (default),4,6,2;",
+	"OU,Spinner Reverse,Off,On;",
 	"-;",
 	"DIP;",
 	"-;",
 	"R0,Reset;",
 	"J1,Fire,Superzapper,Fire Down,Fire Up,Start 1P,Start 2P,Coin,Pause;",
 	"jn,A,B,X,Y,Start,Select,R,L;",
-	"V,v1.10.",`BUILD_DATE
+	"V,v1.2.",`BUILD_DATE
 };
 
 ////////////////////   CLOCKS   ///////////////////
@@ -354,7 +355,8 @@ wire  [7:0] ioctl_index;
 wire [15:0] joy_0, joy_1;
 wire [15:0] joy = joy_0 | joy_1;
 wire [15:0] joy_l_analog_0;
-wire  [8:0] spinner_0, spinner_1;   // real USB spinner devices (hps_io)
+wire  [8:0] spinner_0, spinner_1;   // dedicated USB spinner devices (hps_io)
+wire [24:0] ps2_mouse;              // USB/PS2 mouse: [15:8]=X, [4]=Xsign, [1:0]=R/L btn, [24]=toggle
 wire        rom_download = ioctl_download && !ioctl_index;
 wire        nvram_download = ioctl_download && (ioctl_index == 8'd4);
 wire [24:0] dl_addr = ioctl_addr;
@@ -386,8 +388,9 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.joystick_0(joy_0),
 	.joystick_1(joy_1),
 	.joystick_l_analog_0(joy_l_analog_0),
-	.spinner_0(spinner_0),         // real USB spinner P1: [7:0]=signed delta, [8]=toggle-on-update
-	.spinner_1(spinner_1)          // real USB spinner P2
+	.spinner_0(spinner_0),         // dedicated USB spinner P1: [7:0]=signed delta, [8]=toggle
+	.spinner_1(spinner_1),         // dedicated USB spinner P2
+	.ps2_mouse(ps2_mouse)          // USB/PS2 mouse: movement (X) + L/R buttons -> knob + fire/zap
 );
 
 // DIP switch loading — currently unused (game settings via Test Mode / NVRAM)
@@ -403,18 +406,22 @@ always @(posedge clk_12) if (ioctl_wr && (ioctl_index==254) && !ioctl_addr[24:3]
 // ===== Spinner -> 4-bit knob counter (t_spin) =====
 // MAME models Tempest's knob as a 4-bit (0x0f) up/down count read on IN1_DSW0[3:0]
 // (atari/tempest.cpp: IPT_DIAL, FULL_TURN_COUNT 72, into POKEY1).  The game reads this
-// nibble and deltas it; t_spin IS that counter.  Three input sources, in priority order:
+// nibble and deltas it; t_spin IS that counter.  Three input sources:
 //
-//   1. REAL USB spinner (hps_io spinner_0): the authentic path.  spinner_0[8] toggles on
-//      every update; on a toggle edge, add the signed delta spinner_0[7:0] to t_spin.
-//      Delta is scaled down (>>>2) so a physical detent maps to a sensible knob step.
-//   2. Left analog stick: rate-proportional NCO (full throw = fast, feather = fine; ~10%
-//      deadzone) — the source we can bench-test without a physical spinner.
+//   1. REAL USB spinner (hps_io spinner_0/1): the authentic path.  spinner_x[8] toggles
+//      on every HPS poll that has new movement; spinner_x[7:0] is the signed delta.
+//   2. Left analog stick: rate-proportional NCO (full throw = fast, feather = fine).
 //   3. D-pad L/R: fixed-rate fallback.
 //
-// Player-select ($60E0 D2, latched as player_sel in tempest.vhd) chooses P1/P2 knob on the
-// real hardware; with a single MiSTer spinner we feed spinner_0 (P1) and also fold in
-// spinner_1 so a 2nd device works.  All sources converge on the SAME counter MAME reads.
+// ── SPINNER SCALING BUG FIX (was: dead spinners on every release) ──────────────────────
+// The old code did `t_spin += sp_delta[7:2]` — an arithmetic >>2 applied PER POLL.  Real
+// MiSTer spinners send SMALL per-poll deltas (often +-1..+-3); >>2 floors those to 0, so the
+// movement was silently DISCARDED and the spinner felt dead unless cranked violently (and
+// asymmetric: -1>>2 = -1 but +1>>2 = 0).  Reference: the proven Arkanoid core scales spinner
+// deltas UP (x2..x16), never down — raw spinner deltas are small, not large.
+// FIX: a LOSSLESS accumulator (Arkanoid pattern).  Add the FULL signed delta into a wide
+// accumulator every poll; emit one knob step per SPIN_DIV accumulated units and KEEP the
+// remainder.  Nothing is ever floored away, so slow spinning registers; SPIN_DIV sets feel.
 wire signed [7:0] t_ax       = $signed(joy_l_analog_0[7:0]);
 wire        [7:0] t_amag_raw = t_ax[7] ? (~joy_l_analog_0[7:0] + 8'd1) : joy_l_analog_0[7:0];
 wire        [7:0] t_amag     = (t_amag_raw > 8'd12) ? t_amag_raw : 8'd0;
@@ -425,31 +432,121 @@ reg  [3:0]  t_spin = 4'd0;
 reg  [22:0] t_phase = 23'd0;
 reg         t_pamsb = 1'b0;
 
-// Real-spinner edge detect: each device's bit 8 toggles on every new delta.  XOR the two
-// toggle bits (NOT OR) so a single-device update ALWAYS produces a detectable edge — OR can
-// mask an update (proven in sim: OR caught 2/5, XOR 4/5).  One physical spinner is the norm;
-// the only XOR miss is both devices updating in the same tick, which one knob can't do.
+// Real-spinner edge detect: each device's bit 8 toggles on a new delta.  XOR (not OR) so a
+// single-device update always makes an edge (OR can mask updates; one knob is the norm).
 wire        sp_tgl  = spinner_0[8] ^ spinner_1[8];
 reg         sp_tgl_d = 1'b0;
-wire signed [7:0] sp_delta = $signed(spinner_0[7:0]) + $signed(spinner_1[7:0]);
+
+// Mouse/spinner -> 4-bit relative knob.  The knob is a RELATIVE dial the game reads-and-deltas,
+// so per movement event we ADD the (gained) signed delta straight into t_spin in ONE cycle.
+//
+// VELOCITY GAIN (analog feel): the gain TRACKS how fast you move -- slow drag ~2x (fine aim),
+// fast flick ~8x (quick rotation), smooth between.  gain = clamp(|delta|, 2, 8): a 1-2 count
+// poll gives 2x, a >=8 count poll gives 8x, and 3..7 ramp linearly.  This interpolates the two
+// fixed bookends (2x/8x) the user liked into a continuous analog response.  (Replaces the fixed
+// "Mouse Speed" menu; per-poll |delta| IS the mouse/spinner velocity since the HPS polls steadily.)
+//
+// DIRECTION: CW knob should turn the claw CW.  Absolute polarity is hardware-dependent (encoder
+// wiring + our 720 Y-flip in the coord map can invert it) and -- because Tempest's level 1 is a
+// CIRCLE -- screen +-x can't disambiguate rotation (same spin looks opposite at top vs bottom of
+// the rim).  So expose a runtime OSD "Spinner Reverse" (status[30]); set CW->CW on the cab.
+wire osd_sp_rev = status[30];
+
+// --- input source: PS/2 MOUSE or a dedicated USB SPINNER ---
+// A plain USB mouse lands in ps2_mouse (NOT spinner_0): ps2_mouse[15:8] is the X delta as a
+// SIGNED 8-bit 2's-complement value (-1 = 0xFF; bit[4] is just the redundant PS/2 sign copy --
+// do NOT treat [15:8] as magnitude or you get -255 for -1).  Strobe = ps2_mouse[24] toggling;
+// buttons in [1:0].  A dedicated spinner lands in spinner_0/1 ([8] toggles, [7:0] signed).
+// Accept EITHER: edge on ps2_mouse[24] OR the spinner toggle, use whichever moved (X-axis only).
+reg  ps2_tgl_d = 1'b0;
+wire ps2_tgl   = ps2_mouse[24];
+wire ps2_evt   = ps2_tgl ^ ps2_tgl_d;
+wire spin_evt  = sp_tgl  ^ sp_tgl_d;
+// mouse X delta -- EXACTLY the HW-proven Arcade-Arkanoid decode (read verbatim from its source):
+//     position <= position + {{4{ps2_mouse[4]}}, ps2_mouse[15:8]};
+// i.e. ps2_mouse[15:8] is the 8-bit X byte and ps2_mouse[4] is its sign EXTENSION bit; the value
+// is the two's-complement formed by replicating bit[4] above byte[15:8].  (My earlier "negate the
+// magnitude" decode computed -255 for a real -1 = 0xFF -> constant runaway spin.  Copy the
+// working core, don't re-derive.)  9-bit signed result here = {1 more sign bit, the 8 byte bits}.
+wire signed [8:0] ps2_dx = $signed({ps2_mouse[4], ps2_mouse[15:8]});
+wire signed [8:0] sp_dx  = $signed(spinner_0[7:0]) + $signed(spinner_1[7:0]); // dedicated spinner X
+wire signed [8:0] sp_in  = ps2_evt ? ps2_dx : sp_dx;                 // raw per-event delta
+wire signed [8:0] sp_raw = osd_sp_rev ? -sp_in : sp_in;             // optional direction reverse
+
+wire        [8:0] sp_mag  = sp_raw[8] ? (~sp_raw + 9'd1) : sp_raw;   // |sp_raw| = move distance
+
+// ===== RATE-PACED +-1 STEPPER (velocity = step RATE, not step SIZE) =====
+// PROVEN on HW: the game decodes the 4-bit dial by (new-old) wrap, so any per-frame jump >=8
+// reads as the WRONG direction (that was the long-standing "always spins one way" bug -- our old
+// velocity gain emitted +-8 jumps).  At pure +-1/event, direction is CORRECT (HW-confirmed) but
+// slow.  FIX: keep every knob change to +-1, but EMIT MORE OF THEM when the mouse moves fast --
+// velocity drives the RATE, never the size.  Per move event, ADD |delta| into a pending-step
+// queue and latch the direction; a fast pacer drains the queue at +-1 per tick.  Small move = a
+// few steps (fine/incremental); fast move = many steps drained quickly (fast spin); in between
+// scales smoothly.  Steps are spaced (PACE_DIV) so a 60 Hz game sample never sees >=8 -> direction
+// stays correct at any speed.  Queue capped so a huge flick can't run away.
+// PACING IS RELATIVE TO THE GAME'S ~60 Hz DIAL READ (200000 clk_12/frame).  The previous
+// PACE_DIV=24 emitted a step every ~2 us = ~8000 steps/frame -- so a burst of USB mouse polls
+// (mice poll 125-1000 Hz, game reads ~60 Hz) dumped many steps into ONE frame -> the game saw a
+// big (>=8) jump -> the same direction-inversion/"confused movement" we fixed, sneaking back via
+// poll bursts.  Fix: pace at ~2.3 ms/step = ~7 steps per 60 Hz frame -- the MAX that stays under
+// the 8-step inversion threshold -- so even a fast poll burst is spread to <=7/frame (direction
+// always correct) and reads as SMOOTH motion.  ~6 turns/sec top speed (plenty).  Queue cap small
+// (~14) so a hard flick glides at most ~2 frames, not a long coast.
+localparam [15:0] PACE_DIV  = 16'd28000; // one +-1 every ~2.33 ms -> ~7 steps / 60Hz frame
+localparam [9:0]  STEP_CAP  = 10'd14;    // bound a flick to ~2 frames of glide
+reg  [9:0]  sp_queue = 10'd0;            // pending +-1 steps remaining
+reg         sp_qdir  = 1'b0;             // direction of the queued steps (1=down)
+reg  [15:0] sp_pace  = 16'd0;            // pace counter (widened for PACE_DIV)
+// --- SLOW-END de-sensitize (input gain 3/4, lossless 2-bit carry) -----------------------
+// "Fast is great, slow is a touch too sensitive": cut the INPUT gain to 3/4 with a CARRIED
+// remainder so small moves are never floored to zero (that flooring was an old bug).  FAST
+// flicks already saturate STEP_CAP, so this leaves fast feel UNCHANGED and only calms SLOW
+// drags (small per-poll deltas now accumulate 3:4 instead of 1:1).
+// Retune one spot: calmer 1/2 = ({1'b0,sp_mag}+{9'd0,sp_frac1})>>1 ; original 1/1 = sp_mag.
+reg  [1:0]  sp_frac   = 2'd0;            // carried 1/4-steps (lossless)
+wire [10:0] sp_scaled = {1'b0,sp_mag} + {sp_mag,1'b0} + {9'd0, sp_frac}; // mag*3 + carry
+wire [8:0]  sp_steps  = sp_scaled[10:2];                                 // >>2  -> gain 3/4
+wire [1:0]  sp_remn   = sp_scaled[1:0];                                  // remainder, kept
 
 always @(posedge clk_12) begin
-	sp_tgl_d <= sp_tgl;
-	t_pamsb  <= t_phase[22];
-	t_phase  <= t_phase + t_rate;
+	sp_tgl_d  <= sp_tgl;
+	ps2_tgl_d <= ps2_tgl;
+	t_pamsb   <= t_phase[22];
+	t_phase   <= t_phase + t_rate;
 
-	if (sp_tgl ^ sp_tgl_d) begin
-		// 1) REAL spinner update -> add its (scaled) signed delta to the knob counter
-		t_spin <= t_spin + sp_delta[7:2];        // >>>2: physical detents -> knob steps
+	if ((ps2_evt | spin_evt) && (sp_mag != 9'd0)) begin
+		// New mouse/spinner movement: queue |delta| steps in its direction.  If the queue still
+		// holds steps of the SAME direction, add to them; a direction change replaces the queue
+		// (latest intent wins -> instant reversal, no leftover wrong-way steps).
+		if (sp_raw[8] == sp_qdir) begin
+			sp_frac  <= sp_remn;                                            // keep lossless carry
+			sp_queue <= (sp_queue + sp_steps > STEP_CAP) ? STEP_CAP : (sp_queue + sp_steps);
+		end else begin
+			sp_qdir  <= sp_raw[8];
+			sp_frac  <= sp_remn;                                            // fresh carry, new dir
+			sp_queue <= ({1'b0, sp_steps} > STEP_CAP) ? STEP_CAP : {1'b0, sp_steps}; // zero-ext
+		end
+	end else if (sp_queue != 10'd0) begin
+		// Drain the queue at one +-1 step per PACE_DIV ticks (velocity = rate).
+		if (sp_pace == 16'd0) begin
+			sp_pace  <= PACE_DIV;
+			sp_queue <= sp_queue - 10'd1;
+			t_spin   <= t_spin + (sp_qdir ? -4'sd1 : 4'sd1);   // <-- always +-1: direction-safe
+		end else begin
+			sp_pace  <= sp_pace - 16'd1;
+		end
 	end else if (t_phase[22] & ~t_pamsb) begin
-		// 2/3) analog-stick NCO tick (or D-pad fallback rolled into t_rate/t_inc)
+		// analog-stick NCO tick (or D-pad fallback) when no mouse/spinner queue is draining
 		t_spin <= t_spin + (t_inc ? 4'd1 : -4'd1);
 	end
 end
 
 // Buttons (CONF_STR J1: Fire,Superzapper,FireDn,FireUp,Start1,Start2,Coin,Pause -> joy[4..11])
-wire t_fire   = joy[4];
-wire t_zap    = joy[5];
+// Mouse buttons fold in: ps2_mouse[0]=Left->Fire, ps2_mouse[1]=Right->Superzapper (so a mouse
+// is fully playable: move=rotate, LMB=fire, RMB=zap).  OR'd with the gamepad buttons.
+wire t_fire   = joy[4] | ps2_mouse[0];
+wire t_zap    = joy[5] | ps2_mouse[1];
 wire t_start1 = joy[8];
 wire t_start2 = joy[9];
 wire t_coin   = joy[10];
