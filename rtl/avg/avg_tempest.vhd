@@ -82,6 +82,9 @@ architecture Behavioral of avg_tempest is
 	-- 4K vector ROM download decode (dn 0x5000-0x5FFF)
 	signal vecrom_dn_cs: std_logic;
 	signal off_screen: std_logic;   -- drawer flag: TRUE position overflowed the 10-bit screen (warp)
+	signal aa_cover_sig: std_logic_vector(4 downto 0);  -- WU beam coverage from the drawer (0..31)
+	signal eff_intens: std_logic_vector(7 downto 0);    -- base (un-scaled) beam intensity
+	signal zmul: std_logic_vector(12 downto 0);         -- eff_intens * aa_cover (8b * 5b)
 begin
 
 	-- 4K vector RAM (inferred dual-purpose single port, like ram2k but 12-bit)
@@ -125,6 +128,7 @@ begin
 		done => vec_done,
 		xout => xout,
 		yout => yout,
+		aa_cover => aa_cover_sig,
 		off_screen => off_screen
 	);
 
@@ -320,7 +324,12 @@ begin
 	halted<='1' when state=ISHALTED else '0';
 
 	--idiotic scheme for the intensity... thanks to the mame source for this line.
-	zout<=intensity when intens_mod="001" else intens_mod&"00000";
+	eff_intens <= intensity when intens_mod="001" else intens_mod&"00000";
+	-- WU AA component 2: scale the beam intensity by the per-tap coverage (aa_cover/32).
+	-- The core tap stays ~full so the line is never faint; edge taps fade with the
+	-- sub-pixel position => the anti-aliasing.  WU_AA off -> zout = eff_intens (bit-identical).
+	zmul <= eff_intens * aa_cover_sig;          -- 8b * 5b = 13b
+	zout <= zmul(12 downto 5) when WU_AA else eff_intens;   -- >>5 (/32)
 
 	-- Tempest colour: present the latched index to tempest.vhd's colour RAM and
 	-- resolve colorram[idx] -> hue. The nibble {d3,d2,d1,d0} is active-low and
