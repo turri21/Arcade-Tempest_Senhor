@@ -1,3 +1,8 @@
+-=(Tempest_Senhor notes)=-
+
+Tested: Working Video 720p, 1080p & Sound.
+
+___
 # Tempest (Atari, 1981) for MiSTer FPGA
 
 A MiSTer FPGA core for **Tempest**, Atari's 1981 color-vector tube shooter. There
